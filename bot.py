@@ -32,6 +32,9 @@ WATCHDOG_INTERVAL = 120  # 2 minutos (ajusta según necesidad)
 # Variable para registrar la última ejecución del watchdog
 last_watchdog_run = None
 
+# Contador de reanudaciones automáticas realizadas por el watchdog
+watchdog_recovery_count = 0
+
 # Configuración de logging
 logging.basicConfig(
     level=logging.INFO,
@@ -475,7 +478,7 @@ async def status_command(client, message):
         
 @app.on_message(filters.command(["watchdog", "whactdog"]) & filters.user(admin_users))
 async def watchdog_status_command(client, message):
-    global last_watchdog_run
+    global last_watchdog_run, watchdog_recovery_count
     if last_watchdog_run is None:
         await message.reply("🕒 El watchdog aún no se ha ejecutado.")
         return
@@ -488,8 +491,9 @@ async def watchdog_status_command(client, message):
     else:
         time_str = f"{seconds} seg"
     await message.reply(
-        f"🛡️ **Watchdog funcionando correctamente**\n"
-        f"📅 Última revisión: hace {time_str}"
+        f"✅ **Watchdog funcionando correctamente**\n"
+        f"📅 Última revisión: hace {time_str}\n"
+        f"🔄 Reanudaciones automáticas: {watchdog_recovery_count}"
     )        
 
 # ======================== COMANDOS DE MANTENIMIENTO ======================== #
@@ -1892,7 +1896,7 @@ async def compress_video_from_path(task, start_msg):
                         progress_args=(msg, "SUBIDA", start_upload_time)
                     )
                 logger.info("✅ Video comprimido enviado")
-                await notify_group(app, await app.get_messages(chat_id, original_message_id), original_size, compressed_size=compressed_size, status="done")
+                await notify_group(app, await app.get_messages(chat_id, original_message_id), original_size, compressed_size=compressed_size, status="done", processing_time_str=processing_time_str)
                 users_col.update_one(
                     {"user_id": user_id},
                     {"$inc": {"compressed_videos": 1}},
@@ -2893,7 +2897,7 @@ async def start_command(client, message):
             "**🤖 Bot para comprimir videos**\n"
             "➣**Creado por** @InfiniteNetworkAdmin\n\n"
             "**¡Bienvenido!** Puedo reducir el tamaño de los vídeos hasta un 80% o más y se verán bien sin perder tanta calidad\nUsa los botones del menú para interactuar conmigo.\nSi tiene duda use el botón ℹ️ Ayuda\n\n"
-            "**⚙️ Versión 28.5.1 F ⚙️**"
+            "**⚙️ Versión 28.5.5 ⚙️**"
         )
         await send_protected_photo(
             chat_id=message.chat.id,
@@ -3455,7 +3459,7 @@ async def restart_bot():
         success, failed = await notify_all_users(notification_text)
         try:
             await app.send_message(
-                -4826894501,
+                -1003896005361,
                 f"**Notificación de reinicio completada!**\n\n"
                 f"✅ Enviados correctamente: {success}\n"
                 f"❌ Fallidos: {failed}"
@@ -3756,7 +3760,7 @@ async def handle_message(client, message):
     except Exception as e:
         logger.error(f"Error en handle_message: {e}", exc_info=True)
 
-async def notify_group(client, message: Message, original_size: int, compressed_size: int = None, status: str = "start"):
+async def notify_group(client, message: Message, original_size: int, compressed_size: int = None, status: str = "start", processing_time_str: str = None):
     """
     Envía notificaciones al grupo de administración sobre el estado de los videos.
     Soporta mensajes de tipo video y documento.
@@ -3786,7 +3790,7 @@ async def notify_group(client, message: Message, original_size: int, compressed_
 
         if status == "start":
             text = (
-                "📤 **Nuevo video recibido para comprimir**\n\n"
+                "🗜️ **Nuevo video recibido para comprimir**\n\n"
                 f"👤 **Usuario:** {username}\n"
                 f"🆔 **ID:** `{user.id}`\n"
                 f"📦 **Tamaño original:** {size_mb} MB\n"
@@ -3794,14 +3798,18 @@ async def notify_group(client, message: Message, original_size: int, compressed_
             )
         elif status == "done" and compressed_size is not None:
             compressed_mb = compressed_size // (1024 * 1024)
-            text = (
-                "📥 **Video comprimido y enviado**\n\n"
-                f"👤 **Usuario:** {username}\n"
-                f"🆔 **ID:** `{user.id}`\n"
-                f"📦 **Tamaño original:** {size_mb} MB\n"
-                f"📉 **Tamaño comprimido:** {compressed_mb} MB\n"
-                f"📁 **Nombre:** `{file_name}`"
-            )
+            # Construir el mensaje con líneas para incluir el tiempo opcional
+            text_lines = [
+                "✅ **Video comprimido y enviado**\n",
+                f"👤 **Usuario:** {username}",
+                f"🆔 **ID:** `{user.id}`",
+                f"📦 **Tamaño original:** {size_mb} MB",
+                f"📉 **Tamaño comprimido:** {compressed_mb} MB"
+            ]
+            if processing_time_str:
+                text_lines.append(f"⏰ **Tiempo transcurrido:** {processing_time_str}")
+            text_lines.append(f"📁 **Nombre:** `{file_name}`")
+            text = "\n".join(text_lines)
         else:
             # status desconocido, no enviar mensaje
             return
@@ -3816,6 +3824,7 @@ async def notify_group(client, message: Message, original_size: int, compressed_
 
 async def recover_pending_compressions():
     """Pone los videos descargados en la cola de compresión si no hay compresiones activas."""
+    global watchdog_recovery_count  # Acceso al contador global
     try:
         downloaded_count = downloaded_videos_col.count_documents({})
         if downloaded_count == 0:
@@ -3850,6 +3859,11 @@ async def recover_pending_compressions():
                     task["wait_msg"] = None
             await compression_processing_queue.put(task)
             logger.info(f"Watchdog: Video {file_name} añadido a la cola de compresión.")
+        
+        # Incrementar contador de reanudaciones
+        watchdog_recovery_count += 1
+        logger.info(f"Watchdog: Recuperación completada. Total reanudaciones: {watchdog_recovery_count}")
+        
         global processing_tasks
         new_tasks = []
         for task in processing_tasks:
